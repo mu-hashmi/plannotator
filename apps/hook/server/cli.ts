@@ -25,7 +25,7 @@ export function formatTopLevelHelp(): string {
     "  plannotator --help",
     "  plannotator --version, -v",
     "  plannotator [--browser <name>]",
-    "  plannotator review [--git] [PR_URL]",
+    "  plannotator review [--git] [--auto-run-analysis] [PR_URL]",
     "  plannotator annotate <file.md | file.html | https://... | folder/>  [--no-jina] [--gate] [--json] [--hook]",
     "  plannotator last",
     "  plannotator archive",

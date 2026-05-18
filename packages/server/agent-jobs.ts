@@ -33,9 +33,26 @@ export interface AgentJobHandler {
     url: URL,
     options?: { disableIdleTimeout?: () => void },
   ) => Promise<Response | null>;
+  launchJob: (params: AgentJobLaunchParams) => Promise<AgentJobLaunchResult>;
+  getCapabilities: () => AgentCapabilities;
   /** Kill all running jobs — call on server shutdown. */
   killAll: () => void;
 }
+
+export interface AgentJobLaunchParams {
+  provider?: string;
+  command?: string[];
+  label?: string;
+  engine?: string;
+  model?: string;
+  reasoningEffort?: string;
+  effort?: string;
+  fastMode?: boolean;
+}
+
+export type AgentJobLaunchResult =
+  | { job: AgentJobInfo }
+  | { error: string; status: number };
 
 // ---------------------------------------------------------------------------
 // Route prefixes
@@ -93,6 +110,8 @@ export interface AgentJobHandlerOptions {
    * Use for result ingestion (e.g., reading an output file and pushing annotations).
    */
   onJobComplete?: (job: AgentJobInfo, meta: { outputPath?: string; stdout?: string; cwd?: string }) => void | Promise<void>;
+  /** Called after any terminal job state is reached. */
+  onJobSettled?: (job: AgentJobInfo) => void | Promise<void>;
 }
 
 export function createAgentJobHandler(options: AgentJobHandlerOptions): AgentJobHandler {
@@ -299,6 +318,7 @@ export function createAgentJobHandler(options: AgentJobHandlerOptions): AgentJob
         }
         jobOutputPaths.delete(id);
         jobOutputPaths.delete(`${id}:cwd`);
+        await options.onJobSettled?.(entry.info);
 
         broadcast({ type: "job:completed", job: { ...entry.info } });
       }).catch(() => {
@@ -313,6 +333,7 @@ export function createAgentJobHandler(options: AgentJobHandlerOptions): AgentJob
       info.status = "failed";
       info.endedAt = Date.now();
       info.error = err instanceof Error ? err.message : String(err);
+      void options.onJobSettled?.(info);
       broadcast({ type: "job:completed", job: { ...info } });
     }
 
@@ -335,6 +356,7 @@ export function createAgentJobHandler(options: AgentJobHandlerOptions): AgentJob
     entry.info.endedAt = Date.now();
     jobOutputPaths.delete(id);
     jobOutputPaths.delete(`${id}:cwd`);
+    void options.onJobSettled?.(entry.info);
     broadcast({ type: "job:completed", job: { ...entry.info } });
     return true;
   }
@@ -354,9 +376,83 @@ export function createAgentJobHandler(options: AgentJobHandlerOptions): AgentJob
     return Array.from(jobs.values()).map((e) => ({ ...e.info }));
   }
 
+  async function launchJobFromBody(body: AgentJobLaunchParams): Promise<AgentJobLaunchResult> {
+    const provider = typeof body.provider === "string" ? body.provider : "";
+    let rawCommand = Array.isArray(body.command) ? body.command : [];
+    let command = rawCommand.filter((c: unknown): c is string => typeof c === "string");
+    let label = typeof body.label === "string" ? body.label : `${provider} agent`;
+    let outputPath: string | undefined;
+
+    const cap = capabilities.find((c) => c.id === provider);
+    if (!cap || !cap.available) {
+      return { error: `Unknown or unavailable provider: ${provider}`, status: 400 };
+    }
+
+    let captureStdout = false;
+    let stdinPrompt: string | undefined;
+    let spawnCwd: string | undefined;
+    let promptText: string | undefined;
+    let jobEngine: string | undefined;
+    let jobModel: string | undefined;
+    let jobEffort: string | undefined;
+    let jobReasoningEffort: string | undefined;
+    let jobFastMode: boolean | undefined;
+    let jobPrUrl: string | undefined;
+    let jobDiffScope: string | undefined;
+    let jobDiffContext: AgentJobInfo["diffContext"] | undefined;
+    if (options.buildCommand) {
+      const config: Record<string, unknown> = {};
+      if (typeof body.engine === "string") config.engine = body.engine;
+      if (typeof body.model === "string") config.model = body.model;
+      if (typeof body.reasoningEffort === "string") config.reasoningEffort = body.reasoningEffort;
+      if (typeof body.effort === "string") config.effort = body.effort;
+      if (body.fastMode === true) config.fastMode = true;
+      const built = await options.buildCommand(provider, Object.keys(config).length > 0 ? config : undefined);
+      if (built) {
+        command = built.command;
+        outputPath = built.outputPath;
+        captureStdout = built.captureStdout ?? false;
+        stdinPrompt = built.stdinPrompt;
+        spawnCwd = built.cwd;
+        promptText = built.prompt;
+        if (built.label) label = built.label;
+        jobEngine = built.engine;
+        jobModel = built.model;
+        jobEffort = built.effort;
+        jobReasoningEffort = built.reasoningEffort;
+        jobFastMode = built.fastMode;
+        jobPrUrl = built.prUrl;
+        jobDiffScope = built.diffScope;
+        jobDiffContext = built.diffContext;
+      }
+    }
+
+    if (command.length === 0) {
+      return { error: 'Missing "command" array', status: 400 };
+    }
+
+    const job = spawnJob(provider, command, label, outputPath, {
+      captureStdout,
+      stdinPrompt,
+      cwd: spawnCwd,
+      prompt: promptText,
+      engine: jobEngine,
+      model: jobModel,
+      effort: jobEffort,
+      reasoningEffort: jobReasoningEffort,
+      fastMode: jobFastMode,
+      prUrl: jobPrUrl,
+      diffScope: jobDiffScope,
+      diffContext: jobDiffContext,
+    });
+    return { job };
+  }
+
   // --- HTTP handler ---
   return {
     killAll,
+    launchJob: launchJobFromBody,
+    getCapabilities: () => capabilitiesResponse,
 
     async handle(
       req: Request,
@@ -428,85 +524,9 @@ export function createAgentJobHandler(options: AgentJobHandlerOptions): AgentJob
       // --- POST /api/agents/jobs (launch) ---
       if (url.pathname === JOBS && req.method === "POST") {
         try {
-          const body = await req.json();
-          const provider = typeof body.provider === "string" ? body.provider : "";
-          let rawCommand = Array.isArray(body.command) ? body.command : [];
-          let command = rawCommand.filter((c: unknown): c is string => typeof c === "string");
-          let label = typeof body.label === "string" ? body.label : `${provider} agent`;
-          let outputPath: string | undefined;
-
-          // Validate provider is a known, available capability
-          const cap = capabilities.find((c) => c.id === provider);
-          if (!cap || !cap.available) {
-            return Response.json(
-              { error: `Unknown or unavailable provider: ${provider}` },
-              { status: 400 },
-            );
-          }
-
-          // Try server-side command building for known providers
-          let captureStdout = false;
-          let stdinPrompt: string | undefined;
-          let spawnCwd: string | undefined;
-          let promptText: string | undefined;
-          let jobEngine: string | undefined;
-          let jobModel: string | undefined;
-          let jobEffort: string | undefined;
-          let jobReasoningEffort: string | undefined;
-          let jobFastMode: boolean | undefined;
-          let jobPrUrl: string | undefined;
-          let jobDiffScope: string | undefined;
-          let jobDiffContext: AgentJobInfo["diffContext"] | undefined;
-          if (options.buildCommand) {
-            // Thread config from POST body to buildCommand
-            const config: Record<string, unknown> = {};
-            if (typeof body.engine === "string") config.engine = body.engine;
-            if (typeof body.model === "string") config.model = body.model;
-            if (typeof body.reasoningEffort === "string") config.reasoningEffort = body.reasoningEffort;
-            if (typeof body.effort === "string") config.effort = body.effort;
-            if (body.fastMode === true) config.fastMode = true;
-            const built = await options.buildCommand(provider, Object.keys(config).length > 0 ? config : undefined);
-            if (built) {
-              command = built.command;
-              outputPath = built.outputPath;
-              captureStdout = built.captureStdout ?? false;
-              stdinPrompt = built.stdinPrompt;
-              spawnCwd = built.cwd;
-              promptText = built.prompt;
-              if (built.label) label = built.label;
-              jobEngine = built.engine;
-              jobModel = built.model;
-              jobEffort = built.effort;
-              jobReasoningEffort = built.reasoningEffort;
-              jobFastMode = built.fastMode;
-              jobPrUrl = built.prUrl;
-              jobDiffScope = built.diffScope;
-              jobDiffContext = built.diffContext;
-            }
-          }
-
-          if (command.length === 0) {
-            return Response.json(
-              { error: 'Missing "command" array' },
-              { status: 400 },
-            );
-          }
-
-          const job = spawnJob(provider, command, label, outputPath, {
-            captureStdout,
-            stdinPrompt,
-            cwd: spawnCwd,
-            prompt: promptText,
-            engine: jobEngine,
-            model: jobModel,
-            effort: jobEffort,
-            reasoningEffort: jobReasoningEffort,
-            fastMode: jobFastMode,
-            prUrl: jobPrUrl,
-            diffScope: jobDiffScope,
-            diffContext: jobDiffContext,
-          });
-          return Response.json({ job }, { status: 201 });
+          const result = await launchJobFromBody(await req.json());
+          if ("error" in result) return Response.json({ error: result.error }, { status: result.status });
+          return Response.json({ job: result.job }, { status: 201 });
         } catch {
           return Response.json({ error: "Invalid JSON" }, { status: 400 });
         }

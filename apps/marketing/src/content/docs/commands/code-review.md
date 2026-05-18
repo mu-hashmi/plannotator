@@ -22,9 +22,17 @@ The `/plannotator-review` command opens an interactive code review UI for your l
 /plannotator-review https://github.com/owner/repo/pull/123
 ```
 
+**Open analysis-first review:**
+
+```
+/plannotator-review --auto-run-analysis https://github.com/owner/repo/pull/123
+```
+
 PR review uses the `gh` CLI for authentication, so private repos work automatically if you're authenticated with `gh auth login`.
 
 GitLab merge request URLs are also supported when the `glab` CLI is installed and authenticated.
+
+`--auto-run-analysis` is opt-in. Without it, the review UI opens in the existing file-first mode. With it, Plannotator starts Code Tour and code review agent jobs as soon as the review session opens, then shows analysis sections, findings, Chat, and Agents in the review surface. Codex is preferred with `gpt-5.5` and high reasoning when available; Claude falls back to `claude-opus-4-7` with high effort.
 
 ## How it works
 
@@ -111,6 +119,17 @@ Select any text in the diff to annotate it, just like in plan review. Your annot
 
 When an AI provider is available, the diff viewer includes inline AI chat. Select lines in the diff and choose "Ask AI" to ask questions about the code. Responses stream into a sidebar panel grouped by file.
 
+In analysis-first mode, Chat can also be opened from a section, finding, human comment, line range, or the whole review. Those entrypoints attach explicit context chips to the chat request.
+
+## Analysis mode
+
+Analysis mode keeps local and PR review behavior separate:
+
+- **Sections** come from Code Tour output and appear beside the existing Files navigation.
+- **Findings** come from review agents and are tracked separately from human annotations, with open, resolved, dismissed, and posted statuses for the current session.
+- **Info** combines human comments and agent findings. Platform posting actions only appear when the session has PR or MR metadata.
+- **Agents** remains available for manual runs. You can run analysis or review jobs without passing `--auto-run-analysis`; the UI promotes their output when results arrive.
+
 ### Supported providers
 
 Plannotator supports multiple AI providers. Providers are auto-detected based on which CLI tools are installed on your system:
@@ -185,5 +204,8 @@ Runtime keys use Plannotator's runtime identifiers. For code review, the current
 | `/api/ai/permission` | POST | Respond to tool approval request |
 | `/api/agents/capabilities` | GET | Check available agent providers |
 | `/api/agents/jobs` | GET/POST/DELETE | Manage agent jobs (Code Tour, etc.) |
+| `/api/review-analysis/stream` | GET | SSE stream for analysis sections and findings |
+| `/api/review-analysis` | GET/PATCH | Snapshot analysis or update finding status |
+| `/api/review-analysis/run` | POST | Manually run analysis, review, or both |
 | `/api/pr-list` | GET | List PRs for the current repo |
 | `/api/pr-switch` | POST | Switch to a different PR in-place |

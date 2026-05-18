@@ -5,6 +5,7 @@ export interface ParsedReviewArgs {
   prUrl?: string;
   vcsType?: VcsSelection;
   useLocal: boolean;
+  autoRunAnalysis: boolean;
 }
 
 export function parseReviewArgs(input: string | string[]): ParsedReviewArgs {
@@ -14,6 +15,7 @@ export function parseReviewArgs(input: string | string[]): ParsedReviewArgs {
 
   let vcsType: VcsSelection | undefined;
   let useLocal = true;
+  let autoRunAnalysis = false;
   const positional: string[] = [];
 
   for (const token of tokens) {
@@ -27,6 +29,9 @@ export function parseReviewArgs(input: string | string[]): ParsedReviewArgs {
       case "--no-local":
         useLocal = false;
         break;
+      case "--auto-run-analysis":
+        autoRunAnalysis = true;
+        break;
       default:
         positional.push(token);
         break;
@@ -38,6 +43,7 @@ export function parseReviewArgs(input: string | string[]): ParsedReviewArgs {
     prUrl: target && isReviewUrl(target) ? target : undefined,
     vcsType,
     useLocal,
+    autoRunAnalysis,
   };
 }
 

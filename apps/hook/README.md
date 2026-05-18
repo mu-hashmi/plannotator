@@ -110,7 +110,7 @@ The plugin registers three slash commands:
 
 | Command | Description |
 |---------|-------------|
-| `/plannotator-review [--git]` | Open code review UI for current changes or a GitHub PR; `--git` forces Git in JJ workspaces |
+| `/plannotator-review [--git] [--auto-run-analysis]` | Open code review UI for current changes or a GitHub PR; `--git` forces Git in JJ workspaces and `--auto-run-analysis` starts analysis immediately |
 | `/plannotator-annotate <file.md>` | Annotate any markdown file |
 | `/plannotator-last` | Annotate the agent's last message |
 

@@ -1,5 +1,6 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import type { AIQuestion, AIResponse } from '@plannotator/ui/types';
+import type { ReviewChatContextRef } from '@plannotator/shared/review-analysis';
 import { generateId } from '../utils/generateId';
 export interface AIChatEntry {
   question: AIQuestion;
@@ -26,6 +27,7 @@ interface UseAIChatOptions {
 
 interface AskParams {
   prompt: string;
+  contextRefs?: ReviewChatContextRef[];
   filePath?: string;
   lineStart?: number;
   lineEnd?: number;
@@ -92,6 +94,7 @@ export function useAIChat({ patch, providerId, model, reasoningEffort }: UseAICh
     const question: AIQuestion = {
       id: questionId,
       prompt: params.prompt,
+      contextRefs: params.contextRefs,
       filePath: params.filePath,
       lineStart: params.lineStart,
       lineEnd: params.lineEnd,
@@ -135,6 +138,9 @@ export function useAIChat({ patch, providerId, model, reasoningEffort }: UseAICh
         fullPrompt = `Re: ${params.filePath} (entire file)\n\n${params.prompt}`;
       }
       // else: general — use prompt as-is
+      if (params.contextRefs?.length) {
+        fullPrompt = `${formatContextRefs(params.contextRefs)}\n\n${fullPrompt}`;
+      }
 
       // Start SSE stream
       const res = await fetch('/api/ai/query', {
@@ -323,4 +329,24 @@ export function useAIChat({ patch, providerId, model, reasoningEffort }: UseAICh
     resetSession,
     sessionId,
   };
+}
+
+function formatContextRefs(refs: ReviewChatContextRef[]): string {
+  return [
+    "Review context references:",
+    ...refs.map((ref) => {
+      switch (ref.type) {
+        case "review":
+          return "- Whole review diff";
+        case "section":
+          return `- Section: ${ref.title} (${ref.files.join(", ") || "no files"})`;
+        case "finding":
+          return `- Finding: ${ref.title} at ${ref.filePath}:${ref.lineStart}-${ref.lineEnd} (${ref.status})`;
+        case "comment":
+          return `- Human comment at ${ref.filePath}:${ref.lineStart}-${ref.lineEnd}: ${ref.text}`;
+        case "lineRange":
+          return `- Line range: ${ref.filePath}:${ref.lineStart}-${ref.lineEnd} (${ref.side})`;
+      }
+    }),
+  ].join("\n");
 }

@@ -1,5 +1,5 @@
 ---
-description: Open interactive code review for current changes or a PR URL; pass --git to force Git in JJ workspaces
+description: Open interactive code review for current changes or a PR URL; pass --git to force Git in JJ workspaces or --auto-run-analysis to start analysis immediately
 allowed-tools: Bash(plannotator:*)
 disable-model-invocation: true
 ---

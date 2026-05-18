@@ -35,6 +35,7 @@ import { isTypingTarget, useReviewSearch, type ReviewSearchMatch } from './hooks
 import { useEditorAnnotations } from '@plannotator/ui/hooks/useEditorAnnotations';
 import { useExternalAnnotations } from '@plannotator/ui/hooks/useExternalAnnotations';
 import { useAgentJobs } from '@plannotator/ui/hooks/useAgentJobs';
+import { useReviewAnalysis } from './hooks/useReviewAnalysis';
 import { exportEditorAnnotations } from '@plannotator/ui/utils/parser';
 import { ResizeHandle } from '@plannotator/ui/components/ResizeHandle';
 import { DockviewReact, type DockviewReadyEvent, type DockviewApi } from 'dockview-react';
@@ -45,6 +46,7 @@ import { SparklesIcon } from './components/SparklesIcon';
 import { ReviewAgentsIcon } from '@plannotator/ui/components/ReviewAgentsIcon';
 import { useSidebar } from '@plannotator/ui/hooks/useSidebar';
 import { FileTree } from './components/FileTree';
+import { AnalysisSectionsTree } from './components/AnalysisSectionsTree';
 import { StackedPRLabel } from './components/StackedPRLabel';
 import { PRSelector } from './components/PRSelector';
 import { PRSwitchOverlay } from './components/PRSwitchOverlay';
@@ -75,6 +77,7 @@ import type { DiffFile } from './types';
 import type { DiffOption, WorktreeInfo, GitContext } from '@plannotator/shared/types';
 import type { PRMetadata } from '@plannotator/shared/pr-types';
 import type { PRDiffScope, PRDiffScopeOption, PRStackInfo, PRStackTree } from '@plannotator/shared/pr-stack';
+import type { ReviewAnalysisAnchor, ReviewAnalysisSection, ReviewChatContextRef, ReviewFinding } from '@plannotator/shared/review-analysis';
 import { altKey } from '@plannotator/ui/utils/platform';
 import { TourDialog } from './components/tour/TourDialog';
 import { DEMO_TOUR_ID } from './demoTour';
@@ -271,6 +274,25 @@ const ReviewApp: React.FC = () => {
   // so this should be addressed as a broader refactor.
   const { externalAnnotations, updateExternalAnnotation, deleteExternalAnnotation } = useExternalAnnotations<CodeAnnotation>({ enabled: !!origin });
   const agentJobs = useAgentJobs({ enabled: !!origin });
+  const reviewAnalysis = useReviewAnalysis({ enabled: !!origin });
+  const analysis = reviewAnalysis.analysis;
+  const isAnalysisMode = !!analysis && (
+    analysis.autoRun ||
+    analysis.sections.length > 0 ||
+    analysis.findings.length > 0 ||
+    analysis.isRunningAnalysis ||
+    analysis.isRunningReview
+  );
+  const [leftNavMode, setLeftNavMode] = useState<'files' | 'sections'>('files');
+  const leftNavInitializedRef = useRef(false);
+
+  useEffect(() => {
+    if (!analysis || leftNavInitializedRef.current) return;
+    if (analysis.autoRun) {
+      setLeftNavMode('sections');
+      leftNavInitializedRef.current = true;
+    }
+  }, [analysis]);
 
   // Tour dialog state — opens as an overlay instead of a dock panel
   const [tourDialogJobId, setTourDialogJobId] = useState<string | null>(null);
@@ -363,6 +385,8 @@ const ReviewApp: React.FC = () => {
     hasSearchableFiles ||
     !!gitContext?.diffOptions?.length ||
     !!gitContext?.worktrees?.length;
+  const shouldShowLeftNav = shouldShowFileTree || isAnalysisMode;
+  const activeLeftNavMode = isAnalysisMode ? leftNavMode : 'files';
 
   // Merge local + SSE annotations, deduping draft-restored externals against
   // live SSE versions. Prefer the SSE version when both exist (same source,
@@ -494,6 +518,13 @@ const ReviewApp: React.FC = () => {
 
     aiChat.ask({
       prompt: question,
+      contextRefs: [{
+        type: 'lineRange',
+        filePath: files[activeFileIndex].path,
+        lineStart,
+        lineEnd,
+        side,
+      }],
       filePath: files[activeFileIndex].path,
       lineStart,
       lineEnd,
@@ -519,6 +550,52 @@ const ReviewApp: React.FC = () => {
       side: side === 'new' ? 'additions' : 'deletions',
     });
   }, [openDiffFile]);
+
+  const handleSelectAnalysisAnchor = useCallback((anchor: ReviewAnalysisAnchor) => {
+    openDiffFile(anchor.filePath);
+    setPendingSelection({
+      start: anchor.lineStart,
+      end: anchor.lineEnd,
+      side: 'additions',
+    });
+  }, [openDiffFile]);
+
+  const handleAskWithContext = useCallback((prompt: string, contextRefs: ReviewChatContextRef[]) => {
+    reviewSidebar.open('ai');
+    aiChat.ask({ prompt, contextRefs });
+  }, [aiChat, reviewSidebar]);
+
+  const handleAskSection = useCallback((section: ReviewAnalysisSection) => {
+    handleAskWithContext('Explain this section and the review risk it carries.', [{
+      type: 'section',
+      sectionId: section.id,
+      title: section.title,
+      files: section.files,
+    }]);
+  }, [handleAskWithContext]);
+
+  const handleAskFinding = useCallback((finding: ReviewFinding) => {
+    handleAskWithContext('Help me evaluate this finding. Is it valid, and what should change?', [{
+      type: 'finding',
+      findingId: finding.id,
+      title: finding.text.split('\n')[0] || finding.kind,
+      filePath: finding.filePath,
+      lineStart: finding.lineStart,
+      lineEnd: finding.lineEnd,
+      status: finding.status,
+    }]);
+  }, [handleAskWithContext]);
+
+  const handleAskComment = useCallback((annotation: CodeAnnotation) => {
+    handleAskWithContext('Help me reason about this human review comment.', [{
+      type: 'comment',
+      commentId: annotation.id,
+      filePath: annotation.filePath,
+      lineStart: annotation.lineStart,
+      lineEnd: annotation.lineEnd,
+      text: annotation.text ?? '',
+    }]);
+  }, [handleAskWithContext]);
 
 
   // AI messages overlapping the current selection (for toolbar history)
@@ -547,7 +624,7 @@ const ReviewApp: React.FC = () => {
 
   // General AI question from sidebar input
   const handleAskGeneral = useCallback((question: string) => {
-    aiChat.ask({ prompt: question });
+    aiChat.ask({ prompt: question, contextRefs: [{ type: 'review' }] });
   }, [aiChat.ask]);
 
   // Resizable panels
@@ -639,6 +716,7 @@ const ReviewApp: React.FC = () => {
   // Auto-open tour dialog when a tour job completes
   const tourAutoOpenRef = useRef(new Set<string>());
   useEffect(() => {
+    if (isAnalysisMode) return;
     for (const job of agentJobs.jobs) {
       if (
         job.provider === 'tour' &&
@@ -649,7 +727,7 @@ const ReviewApp: React.FC = () => {
         setTourDialogJobId(job.id);
       }
     }
-  }, [agentJobs.jobs]);
+  }, [agentJobs.jobs, isAnalysisMode]);
 
   // Open PR panel as center dock panel
   const handleOpenPRPanel = useCallback((type: 'summary' | 'comments' | 'checks') => {
@@ -698,6 +776,7 @@ const ReviewApp: React.FC = () => {
         if (hasSearchableFiles) {
           e.preventDefault();
           setIsFileTreeOpen(true);
+          setLeftNavMode('files');
           openSearch();
         }
         return;
@@ -1474,6 +1553,7 @@ const ReviewApp: React.FC = () => {
   }, [allAnnotations, prMetadata, feedbackDiffContext, prReviewScopeLabel, editorAnnotations]);
 
   const totalAnnotationCount = allAnnotations.length + editorAnnotations.length;
+  const infoCount = totalAnnotationCount + (isAnalysisMode ? (analysis?.findings.length ?? 0) : 0);
 
   // Send feedback to OpenCode via API
   const handleSendFeedback = useCallback(async () => {
@@ -1660,6 +1740,38 @@ const ReviewApp: React.FC = () => {
     setPlatformCommentDialog({ action, plan });
   }, [allAnnotations, editorAnnotations, files, prMetadata]);
 
+  const handlePostFinding = useCallback(async (finding: ReviewFinding) => {
+    if (!prMetadata) return;
+    const side = finding.side === 'old' ? 'LEFT' : 'RIGHT';
+    try {
+      const res = await fetch('/api/pr-action', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'comment',
+          body: 'Review from Plannotator',
+          targetPrUrl: prMetadata.url,
+          fileComments: [{
+            path: finding.filePath,
+            line: finding.lineEnd,
+            side,
+            body: finding.text,
+            ...(finding.lineStart !== finding.lineEnd && { start_line: finding.lineStart, start_side: side }),
+          }],
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data.error) throw new Error(data.error ?? 'Failed to post finding');
+      await reviewAnalysis.updateFindingStatus(finding.id, 'posted');
+      toast('Finding posted to platform');
+    } catch (err) {
+      toast('Failed to post finding', {
+        description: err instanceof Error ? err.message : String(err),
+        duration: 4000,
+      });
+    }
+  }, [prMetadata, reviewAnalysis.updateFindingStatus]);
+
   // Double-tap Option/Alt to toggle review destination (PR mode only)
   useEffect(() => {
     if (!prMetadata) return;
@@ -1769,7 +1881,7 @@ const ReviewApp: React.FC = () => {
         {/* Header */}
         <header className="py-1 flex items-center justify-between px-2 md:px-4 border-b border-border/50 bg-card/50 backdrop-blur-xl z-50">
           <div className="min-w-0 flex items-center gap-2 md:gap-3 -ml-1.5 md:-ml-3">
-            {shouldShowFileTree && (
+            {shouldShowLeftNav && (
               <>
                 <button
                   onClick={() => setIsFileTreeOpen(prev => !prev)}
@@ -2056,14 +2168,14 @@ const ReviewApp: React.FC = () => {
                   ? 'bg-primary/15 text-primary'
                   : 'text-muted-foreground hover:text-foreground hover:bg-muted'
               }`}
-              title="Annotations"
+              title={isAnalysisMode ? 'Info' : 'Annotations'}
             >
               <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                 <path strokeLinecap="round" strokeLinejoin="round" d="M7 8h10M7 12h4m1 8l-4-4H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-3l-4 4z" />
               </svg>
-              {totalAnnotationCount > 0 && (
+              {infoCount > 0 && (
                 <span className="absolute -top-1 -right-1 min-w-[14px] h-[14px] flex items-center justify-center rounded-full bg-primary text-[8px] font-bold text-primary-foreground px-0.5">
-                  {totalAnnotationCount > 99 ? '99+' : totalAnnotationCount}
+                  {infoCount > 99 ? '99+' : infoCount}
                 </span>
               )}
             </button>
@@ -2075,7 +2187,7 @@ const ReviewApp: React.FC = () => {
                     ? 'bg-primary/15 text-primary'
                     : 'text-muted-foreground hover:text-foreground hover:bg-muted'
                 }`}
-                title="AI Chat"
+                title={isAnalysisMode ? 'Chat' : 'AI Chat'}
               >
                 <SparklesIcon className="w-4 h-4" />
                 {aiChat.messages.length > 0 && !(reviewSidebar.isOpen && reviewSidebar.activeTab === 'ai') && (
@@ -2091,7 +2203,7 @@ const ReviewApp: React.FC = () => {
                     ? 'bg-primary/15 text-primary'
                     : 'text-muted-foreground hover:text-foreground hover:bg-muted'
                 }`}
-                title="Review Agents"
+                title={isAnalysisMode ? 'Agents' : 'Review Agents'}
               >
                 <ReviewAgentsIcon className="w-4 h-4" />
                 {agentJobs.jobs.some(j => j.status === 'running' || j.status === 'starting') && !(reviewSidebar.isOpen && reviewSidebar.activeTab === 'agents') && (
@@ -2104,58 +2216,74 @@ const ReviewApp: React.FC = () => {
 
         {/* Main content */}
         <div className={`flex-1 flex overflow-hidden ${isResizing ? 'select-none' : ''}`}>
-          {shouldShowFileTree && isFileTreeOpen && (
+          {shouldShowLeftNav && isFileTreeOpen && (
             <>
-              <FileTree
-                files={files}
-                activeFileIndex={activeFileIndex}
-                onSelectAllFiles={openAllFilesPanel}
-                isAllFilesActive={isAllFilesActive}
-                scrollHighlightIndex={isAllFilesActive && allFilesVisibleFile ? files.findIndex(f => f.path === allFilesVisibleFile) : undefined}
-                onSelectFile={handleFilePreview}
-                onDoubleClickFile={handleFilePinned}
-                annotations={allAnnotations}
-                viewedFiles={viewedFiles}
-                onToggleViewed={handleToggleViewed}
-                hideViewedFiles={hideViewedFiles}
-                onToggleHideViewed={() => setHideViewedFiles(prev => !prev)}
-                enableKeyboardNav={!showExportModal && hasSearchableFiles}
-                diffOptions={gitContext?.diffOptions}
-                activeDiffType={activeDiffBase}
-                onSelectDiff={handleDiffSwitch}
-                isLoadingDiff={isLoadingDiff}
-                width={fileTreeResize.width}
-                worktrees={gitContext?.worktrees}
-                activeWorktreePath={activeWorktreePath}
-                onSelectWorktree={handleWorktreeSwitch}
-                currentBranch={gitContext?.currentBranch}
-                availableBranches={prMetadata ? undefined : gitContext?.availableBranches}
-                selectedBase={prMetadata ? undefined : selectedBase ?? undefined}
-                detectedBase={prMetadata ? undefined : gitContext?.defaultBranch || gitContext?.compareTarget?.fallback}
-                onSelectBase={prMetadata ? undefined : handleBaseSelect}
-                compareTarget={gitContext?.compareTarget}
-                recentCommits={prMetadata ? undefined : gitContext?.recentCommits}
-                jjEvologs={prMetadata ? undefined : gitContext?.jjEvologs}
-                detectedEvoBase={prMetadata ? undefined : gitContext?.jjEvologs?.[1]?.commitId}
-                stagedFiles={stagedFiles}
-                onCopyRawDiff={handleCopyDiff}
-                canCopyRawDiff={!!diffData?.rawPatch}
-                copyRawDiffStatus={copyRawDiffStatus}
-                searchQuery={hasSearchableFiles ? searchQuery : ''}
-                isSearchOpen={hasSearchableFiles ? isSearchOpen : false}
-                isSearchPending={isSearchPending}
-                searchInputRef={hasSearchableFiles ? searchInputRef : undefined}
-                onOpenSearch={hasSearchableFiles ? openSearch : undefined}
-                onSearchChange={hasSearchableFiles ? handleSearchInputChange : undefined}
-                onSearchClear={hasSearchableFiles ? clearSearch : undefined}
-                onSearchClose={hasSearchableFiles ? closeSearch : undefined}
-                searchGroups={hasSearchableFiles ? searchGroups : []}
-                searchMatches={hasSearchableFiles ? searchMatches : []}
-                activeSearchMatchId={hasSearchableFiles ? activeSearchMatchId : null}
-                onSelectSearchMatch={hasSearchableFiles ? handleSelectSearchMatch : undefined}
-                onStepSearchMatch={hasSearchableFiles ? stepSearchMatch : undefined}
-                repoRoot={prMetadata ? null : (activeWorktreePath ?? agentCwd ?? gitContext?.cwd ?? null)}
-              />
+              {activeLeftNavMode === 'sections' && analysis ? (
+                <AnalysisSectionsTree
+                  sections={analysis.sections}
+                  activeMode={activeLeftNavMode}
+                  onModeChange={setLeftNavMode}
+                  onSelectAnchor={handleSelectAnalysisAnchor}
+                  onAskSection={handleAskSection}
+                  onRunAnalysis={reviewAnalysis.runAnalysis}
+                  isRunning={analysis.isRunningAnalysis}
+                  width={fileTreeResize.width}
+                />
+              ) : (
+                <FileTree
+                  files={files}
+                  activeFileIndex={activeFileIndex}
+                  onSelectAllFiles={openAllFilesPanel}
+                  isAllFilesActive={isAllFilesActive}
+                  scrollHighlightIndex={isAllFilesActive && allFilesVisibleFile ? files.findIndex(f => f.path === allFilesVisibleFile) : undefined}
+                  onSelectFile={handleFilePreview}
+                  onDoubleClickFile={handleFilePinned}
+                  annotations={allAnnotations}
+                  viewedFiles={viewedFiles}
+                  onToggleViewed={handleToggleViewed}
+                  hideViewedFiles={hideViewedFiles}
+                  onToggleHideViewed={() => setHideViewedFiles(prev => !prev)}
+                  enableKeyboardNav={!showExportModal && hasSearchableFiles}
+                  diffOptions={gitContext?.diffOptions}
+                  activeDiffType={activeDiffBase}
+                  onSelectDiff={handleDiffSwitch}
+                  isLoadingDiff={isLoadingDiff}
+                  width={fileTreeResize.width}
+                  worktrees={gitContext?.worktrees}
+                  activeWorktreePath={activeWorktreePath}
+                  onSelectWorktree={handleWorktreeSwitch}
+                  currentBranch={gitContext?.currentBranch}
+                  availableBranches={prMetadata ? undefined : gitContext?.availableBranches}
+                  selectedBase={prMetadata ? undefined : selectedBase ?? undefined}
+                  detectedBase={prMetadata ? undefined : gitContext?.defaultBranch || gitContext?.compareTarget?.fallback}
+                  onSelectBase={prMetadata ? undefined : handleBaseSelect}
+                  compareTarget={gitContext?.compareTarget}
+                  recentCommits={prMetadata ? undefined : gitContext?.recentCommits}
+                  jjEvologs={prMetadata ? undefined : gitContext?.jjEvologs}
+                  detectedEvoBase={prMetadata ? undefined : gitContext?.jjEvologs?.[1]?.commitId}
+                  stagedFiles={stagedFiles}
+                  onCopyRawDiff={handleCopyDiff}
+                  canCopyRawDiff={!!diffData?.rawPatch}
+                  copyRawDiffStatus={copyRawDiffStatus}
+                  searchQuery={hasSearchableFiles ? searchQuery : ''}
+                  isSearchOpen={hasSearchableFiles ? isSearchOpen : false}
+                  isSearchPending={isSearchPending}
+                  searchInputRef={hasSearchableFiles ? searchInputRef : undefined}
+                  onOpenSearch={hasSearchableFiles ? openSearch : undefined}
+                  onSearchChange={hasSearchableFiles ? handleSearchInputChange : undefined}
+                  onSearchClear={hasSearchableFiles ? clearSearch : undefined}
+                  onSearchClose={hasSearchableFiles ? closeSearch : undefined}
+                  searchGroups={hasSearchableFiles ? searchGroups : []}
+                  searchMatches={hasSearchableFiles ? searchMatches : []}
+                  activeSearchMatchId={hasSearchableFiles ? activeSearchMatchId : null}
+                  onSelectSearchMatch={hasSearchableFiles ? handleSelectSearchMatch : undefined}
+                  onStepSearchMatch={hasSearchableFiles ? stepSearchMatch : undefined}
+                  repoRoot={prMetadata ? null : (activeWorktreePath ?? agentCwd ?? gitContext?.cwd ?? null)}
+                  navMode={isAnalysisMode ? activeLeftNavMode : undefined}
+                  onNavModeChange={isAnalysisMode ? setLeftNavMode : undefined}
+                  sectionsCount={analysis?.sections.length ?? 0}
+                />
+              )}
               <ResizeHandle {...fileTreeResize.handleProps} side="left" />
             </>
           )}
@@ -2275,6 +2403,21 @@ const ReviewApp: React.FC = () => {
                 externalAnnotations={externalAnnotations}
                 onOpenJobDetail={handleOpenJobDetail}
                 onOpenPRPanel={handleOpenPRPanel}
+                analysisMode={isAnalysisMode}
+                analysis={analysis}
+                onRunAnalysis={reviewAnalysis.runAnalysis}
+                onRunReview={reviewAnalysis.runReview}
+                onUpdateFindingStatus={(id, status) => {
+                  reviewAnalysis.updateFindingStatus(id, status).catch(err => {
+                    toast('Failed to update finding', {
+                      description: err instanceof Error ? err.message : String(err),
+                      duration: 4000,
+                    });
+                  });
+                }}
+                onAskFinding={handleAskFinding}
+                onAskComment={handleAskComment}
+                onPostFinding={handlePostFinding}
               />
             </>
           )}

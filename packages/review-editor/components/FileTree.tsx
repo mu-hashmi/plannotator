@@ -10,6 +10,7 @@ import { WorktreePicker } from './WorktreePicker';
 import { getReviewSearchSideLabel, type ReviewSearchFileGroup, type ReviewSearchMatch } from '../utils/reviewSearch';
 import type { DiffFile } from '../types';
 import { OverlayScrollArea } from '@plannotator/ui/components/OverlayScrollArea';
+import { NavModeToggle } from './AnalysisSectionsTree';
 
 interface FileTreeProps {
   files: DiffFile[];
@@ -65,6 +66,9 @@ interface FileTreeProps {
   scrollHighlightIndex?: number;
   /** Absolute repo root for the "Copy full path" context menu item. Null/undefined hides the option (e.g. PR review mode). */
   repoRoot?: string | null;
+  navMode?: 'files' | 'sections';
+  onNavModeChange?: (mode: 'files' | 'sections') => void;
+  sectionsCount?: number;
 }
 
 export const FileTree: React.FC<FileTreeProps> = ({
@@ -116,6 +120,9 @@ export const FileTree: React.FC<FileTreeProps> = ({
   isAllFilesActive = false,
   scrollHighlightIndex,
   repoRoot,
+  navMode,
+  onNavModeChange,
+  sectionsCount = 0,
 }) => {
   const isSearchVisible = !!onSearchChange && (isSearchOpen || !!searchQuery.trim());
 
@@ -230,9 +237,15 @@ export const FileTree: React.FC<FileTreeProps> = ({
       {/* Header */}
       <div className="px-3 flex items-center border-b border-border/50" style={{ height: 'var(--panel-header-h)' }}>
         <div className="w-full flex items-center justify-between">
-          <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">
-            {searchQuery.trim() ? 'Results' : 'Files'}
-          </span>
+          {onNavModeChange ? (
+            <div className="w-[148px] flex-shrink-0">
+              <NavModeToggle activeMode={navMode ?? 'files'} onModeChange={onNavModeChange} sectionsCount={sectionsCount} />
+            </div>
+          ) : (
+            <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">
+              {searchQuery.trim() ? 'Results' : 'Files'}
+            </span>
+          )}
           <div className="flex items-center gap-1.5">
             {stagedFiles && stagedFiles.size > 0 && (
               <>

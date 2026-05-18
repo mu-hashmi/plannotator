@@ -47,6 +47,7 @@ import { createEditorAnnotationHandler } from "./annotations.js";
 import { createAgentJobHandler } from "./agent-jobs.js";
 import type { AgentJobInfo } from "../generated/agent-jobs.js";
 import { createExternalAnnotationHandler } from "./external-annotations.js";
+import { createReviewAnalysisHandler } from "./review-analysis.js";
 import {
 	handleDraftRequest,
 	handleFavicon,
@@ -84,6 +85,11 @@ import {
 	transformClaudeFindings,
 } from "../generated/claude-review.js";
 import { createTourSession, TOUR_EMPTY_OUTPUT_ERROR } from "../generated/tour-review.js";
+import {
+	DEFAULT_REVIEW_ANALYSIS_CONFIG,
+	transformClaudeFindingsToReviewFindings,
+	transformCodexFindingsToReviewFindings,
+} from "../generated/review-analysis.js";
 import {
 	type CodeNavRequest,
 	type CodeNavRuntime,
@@ -188,6 +194,9 @@ export async function startReviewServer(options: {
 	worktreePool?: WorktreePool;
 	/** Cleanup callback invoked when server stops (e.g., remove temp worktree) */
 	onCleanup?: () => void | Promise<void>;
+	reviewAnalysis?: {
+		autoRun?: boolean;
+	};
 	/** Called when server starts with the URL, remote status, and port */
 	onReady?: (url: string, isRemote: boolean, port: number) => void;
 }): Promise<ReviewServerResult> {
@@ -249,6 +258,12 @@ export async function startReviewServer(options: {
 		: getRepoInfo();
 	const editorAnnotations = createEditorAnnotationHandler();
 	const externalAnnotations = createExternalAnnotationHandler("review");
+	let runReviewAnalysisJobs: (kind: "analysis" | "review" | "all") => Promise<unknown> =
+		async () => ({ error: "Analysis runners not ready" });
+	const reviewAnalysis = createReviewAnalysisHandler({
+		autoRun: options.reviewAnalysis?.autoRun,
+		run: (kind) => runReviewAnalysisJobs(kind),
+	});
 
 	let currentPatch = options.rawPatch;
 	let currentGitRef = options.gitRef;
@@ -362,7 +377,10 @@ export async function startReviewServer(options: {
 
 			if (job.provider === "codex" && meta.outputPath) {
 				const output = await parseCodexOutput(meta.outputPath);
-				if (!output) return;
+				if (!output) {
+					reviewAnalysis.setRunState({ isRunningReview: false });
+					return;
+				}
 
 				const hasBlockingFindings = output.findings.some(f => f.priority !== null && f.priority <= 1);
 				job.summary = {
@@ -377,6 +395,13 @@ export async function startReviewServer(options: {
 					const result = externalAnnotations.addAnnotations({ annotations });
 					if ("error" in result) console.error(`[codex-review] addAnnotations error:`, result.error);
 				}
+				reviewAnalysis.addFindings(transformCodexFindingsToReviewFindings(output.findings, {
+					source: job.source,
+					cwd,
+					sourceAgent: "Codex",
+					sourceJobId: job.id,
+					sections: reviewAnalysis.getAnalysis().sections,
+				}));
 				return;
 			}
 
@@ -384,6 +409,7 @@ export async function startReviewServer(options: {
 				const output = parseClaudeStreamOutput(meta.stdout);
 				if (!output) {
 					console.error(`[claude-review] Failed to parse output (${meta.stdout.length} bytes, last 200: ${meta.stdout.slice(-200)})`);
+					reviewAnalysis.setRunState({ isRunningReview: false });
 					return;
 				}
 
@@ -400,6 +426,13 @@ export async function startReviewServer(options: {
 					const result = externalAnnotations.addAnnotations({ annotations });
 					if ("error" in result) console.error(`[claude-review] addAnnotations error:`, result.error);
 				}
+				reviewAnalysis.addFindings(transformClaudeFindingsToReviewFindings(output.findings, {
+					source: job.source,
+					cwd,
+					sourceAgent: "Claude Code",
+					sourceJobId: job.id,
+					sections: reviewAnalysis.getAnalysis().sections,
+				}));
 				return;
 			}
 
@@ -407,6 +440,8 @@ export async function startReviewServer(options: {
 				const { summary } = await tour.onJobComplete({ job, meta });
 				if (summary) {
 					job.summary = summary;
+					const tourData = tour.getTour(job.id);
+					if (tourData) reviewAnalysis.setTourResult(tourData, currentPatch);
 				} else {
 					// The process exited 0 but the model returned empty or malformed output
 					// and nothing was stored. Flip status so the client doesn't auto-open
@@ -417,7 +452,62 @@ export async function startReviewServer(options: {
 				return;
 			}
 		},
+
+		onJobSettled(job) {
+			if (job.status === "done") return;
+			if (job.provider === "tour") reviewAnalysis.setRunState({ isRunningAnalysis: false });
+			if (job.provider === "codex" || job.provider === "claude") reviewAnalysis.setRunState({ isRunningReview: false });
+		},
 	});
+	runReviewAnalysisJobs = async (kind) => {
+		const capabilities = agentJobs.getCapabilities();
+		const hasCodex = capabilities.providers.some((provider) => provider.id === "codex" && provider.available);
+		const hasClaude = capabilities.providers.some((provider) => provider.id === "claude" && provider.available);
+		const provider = hasCodex ? "codex" : hasClaude ? "claude" : null;
+		if (!provider) throw new Error("No review agent provider is available");
+
+		const config = provider === "codex"
+			? {
+					provider: "codex",
+					model: DEFAULT_REVIEW_ANALYSIS_CONFIG.primary.model,
+					reasoningEffort: DEFAULT_REVIEW_ANALYSIS_CONFIG.primary.reasoningEffort,
+				}
+			: {
+					provider: "claude",
+					model: DEFAULT_REVIEW_ANALYSIS_CONFIG.fallback.model,
+					effort: DEFAULT_REVIEW_ANALYSIS_CONFIG.fallback.effort,
+				};
+
+		const launched = [];
+		if (kind === "analysis" || kind === "all") {
+			reviewAnalysis.setRunState({ isRunningAnalysis: true });
+			const result = await agentJobs.launchJob({
+				provider: "tour",
+				engine: provider,
+				model: config.model,
+				...(provider === "codex"
+					? { reasoningEffort: DEFAULT_REVIEW_ANALYSIS_CONFIG.primary.reasoningEffort }
+					: { effort: DEFAULT_REVIEW_ANALYSIS_CONFIG.fallback.effort }),
+			});
+			if ("error" in result) {
+				reviewAnalysis.setRunState({ isRunningAnalysis: false });
+				throw new Error(result.error);
+			}
+			launched.push(result.job);
+		}
+
+		if (kind === "review" || kind === "all") {
+			reviewAnalysis.setRunState({ isRunningReview: true });
+			const result = await agentJobs.launchJob(config);
+			if ("error" in result) {
+				reviewAnalysis.setRunState({ isRunningReview: false });
+				throw new Error(result.error);
+			}
+			launched.push(result.job);
+		}
+
+		return { jobs: launched };
+	};
 	const sharingEnabled =
 		options.sharingEnabled ?? process.env.PLANNOTATOR_SHARE !== "disabled";
 	const shareBaseUrl =
@@ -1095,6 +1185,8 @@ export async function startReviewServer(options: {
 			return;
 		} else if (await externalAnnotations.handle(req, res, url)) {
 			return;
+		} else if (await reviewAnalysis.handle(req, res, url)) {
+			return;
 		} else if (await agentJobs.handle(req, res, url)) {
 			return;
 		} else if (aiEndpoints && url.pathname.startsWith("/api/ai/")) {
@@ -1156,6 +1248,15 @@ export async function startReviewServer(options: {
 
 	if (options.onReady) {
 		options.onReady(serverUrl, isRemote, port);
+	}
+
+	if (options.reviewAnalysis?.autoRun) {
+		queueMicrotask(() => {
+			runReviewAnalysisJobs("all").catch((err) => {
+				reviewAnalysis.setRunState({ isRunningAnalysis: false, isRunningReview: false });
+				console.error("[review-analysis] auto-run failed:", err instanceof Error ? err.message : String(err));
+			});
+		});
 	}
 
 	return {

@@ -115,6 +115,7 @@ export async function handleReviewCommand(
     diffType: isPRMode ? undefined : userDiffType,
     gitContext,
     prMetadata,
+    reviewAnalysis: { autoRun: reviewArgs.autoRunAnalysis },
     sharingEnabled: await getSharingEnabled(),
     shareBaseUrl: getShareBaseUrl(),
     htmlContent: reviewHtmlContent,

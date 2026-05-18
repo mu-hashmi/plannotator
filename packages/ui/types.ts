@@ -1,3 +1,5 @@
+import type { ReviewChatContextRef } from '@plannotator/shared/review-analysis';
+
 export enum AnnotationType {
   DELETION = 'DELETION',
   COMMENT = 'COMMENT',
@@ -175,6 +177,7 @@ export interface SelectedLineRange {
 export interface AIQuestion {
   id: string;
   prompt: string;
+  contextRefs?: ReviewChatContextRef[];
   /** undefined = general question (no file scope) */
   filePath?: string;
   /** undefined + filePath present = file-scoped; with filePath = line-scoped */

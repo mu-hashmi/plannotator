@@ -204,7 +204,7 @@ export async function openCodeReview(
 
 export async function startCodeReviewBrowserSession(
 	ctx: ExtensionContext,
-	options: { cwd?: string; defaultBranch?: string; diffType?: DiffType; prUrl?: string; vcsType?: VcsSelection; useLocal?: boolean } = {},
+	options: { cwd?: string; defaultBranch?: string; diffType?: DiffType; prUrl?: string; vcsType?: VcsSelection; useLocal?: boolean; autoRunAnalysis?: boolean } = {},
 ): Promise<
 	BrowserDecisionSession<{
 		approved: boolean;
@@ -429,6 +429,7 @@ export async function startCodeReviewBrowserSession(
 		prMetadata,
 		agentCwd,
 		worktreePool,
+		reviewAnalysis: { autoRun: options.autoRunAnalysis },
 		htmlContent: reviewHtmlContent,
 		sharingEnabled: process.env.PLANNOTATOR_SHARE !== "disabled",
 		shareBaseUrl: process.env.PLANNOTATOR_SHARE_URL || undefined,

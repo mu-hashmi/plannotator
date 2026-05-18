@@ -28,6 +28,10 @@ Used during plan review (`ExitPlanMode` hook).
 | `/api/external-annotations` | POST | Add external annotations (single or batch) |
 | `/api/external-annotations` | PATCH | Update annotation fields (`?id=`) |
 | `/api/external-annotations` | DELETE | Remove by `?id=`, `?source=`, or clear all |
+| `/api/review-analysis/stream` | GET | SSE stream for session-scoped analysis sections and findings |
+| `/api/review-analysis` | GET | Snapshot of analysis state (`?since=N` for version gating) |
+| `/api/review-analysis` | PATCH | Update a finding status (`?id=`) |
+| `/api/review-analysis/run` | POST | Run analysis, review, or both |
 
 ### GET `/api/plan`
 

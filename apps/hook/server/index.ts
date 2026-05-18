@@ -531,6 +531,7 @@ if (args[0] === "sessions") {
     prMetadata,
     agentCwd,
     worktreePool,
+    reviewAnalysis: { autoRun: reviewArgs.autoRunAnalysis },
     sharingEnabled,
     shareBaseUrl,
     htmlContent: reviewHtmlContent,

@@ -407,7 +407,7 @@ export default function plannotator(pi: ExtensionAPI): void {
 	});
 
 	pi.registerCommand("plannotator-review", {
-		description: "Open interactive code review for current changes or a PR URL; pass --git to force Git in JJ workspaces",
+		description: "Open interactive code review for current changes or a PR URL; pass --git to force Git in JJ workspaces or --auto-run-analysis to start analysis immediately",
 		handler: async (args, ctx) => {
 			if (!hasReviewBrowserHtml()) {
 				ctx.ui.notify(
@@ -427,6 +427,7 @@ export default function plannotator(pi: ExtensionAPI): void {
 					prUrl: reviewArgs.prUrl,
 					vcsType: reviewArgs.vcsType,
 					useLocal: reviewArgs.useLocal,
+					autoRunAnalysis: reviewArgs.autoRunAnalysis,
 				});
 				ctx.ui.notify("Code review opened. You can keep chatting while it runs.", "info");
 				void session

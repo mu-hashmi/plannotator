@@ -1,5 +1,6 @@
 import React, { useRef, useEffect, useState, useMemo, useCallback, memo } from 'react';
 import type { AIChatEntry, PendingPermission } from '../hooks/useAIChat';
+import type { ReviewChatContextRef } from '@plannotator/shared/review-analysis';
 import { renderChatMarkdown } from '../utils/renderChatMarkdown';
 import { formatLineRange } from '../utils/formatLineRange';
 import { formatRelativeTime } from '../utils/formatRelativeTime';
@@ -367,6 +368,9 @@ const QAPair = memo<{
                 file
               </span>
             )}
+            {question.contextRefs?.map((ref, index) => (
+              <ContextChip key={`${ref.type}-${index}`} refInfo={ref} />
+            ))}
           </div>
           <span className="text-[10px] text-muted-foreground/50">
             {formatRelativeTime(question.createdAt)}
@@ -396,3 +400,21 @@ const QAPair = memo<{
     </div>
   );
 });
+
+const ContextChip: React.FC<{ refInfo: ReviewChatContextRef }> = ({ refInfo }) => {
+  const label =
+    refInfo.type === 'review' ? 'review'
+    : refInfo.type === 'section' ? `section · ${refInfo.title}`
+    : refInfo.type === 'finding' ? `finding · ${refInfo.status}`
+    : refInfo.type === 'comment' ? 'comment'
+    : `lines · ${formatLineRange(refInfo.lineStart, refInfo.lineEnd)}`;
+
+  return (
+    <span
+      className="max-w-[150px] truncate text-[9px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded bg-accent/10 text-accent"
+      title={label}
+    >
+      {label}
+    </span>
+  );
+};

@@ -1,0 +1,34 @@
+- Plannotator review keeps its current file-first behavior by default when no analysis flag is passed.
+- `plannotator review --auto-run-analysis` opens the review UI and starts the default analysis pipeline without requiring a user click.
+- The analysis-first flow works in both PR mode and local diff mode.
+- The server exposes a first-class review analysis object for the current review session.
+- The review analysis object has an overview with title, summary, before, after, and key takeaways.
+- The review analysis object has ordered sections with title, explanation, files, additions, deletions, and anchors into diff hunks.
+- The review analysis object has findings with kind, severity, confidence, file range, text, source agent, status, and related section.
+- The first slice stores review analysis and finding status in memory for the current review server session only.
+- Findings support `open`, `resolved`, `dismissed`, and `posted` statuses in the current session.
+- Findings are separate from human annotations even when they render inline on the same diff lines.
+- Human annotations keep their current feedback/export behavior.
+- Code Tour output populates the analysis sections instead of only opening a separate tour dialog.
+- The left sidebar can switch between the existing Files view and a new Sections view.
+- When analysis-first mode is active, the left sidebar defaults to Sections view.
+- Each section row shows grouped files plus aggregate additions and deletions.
+- Each section exposes a read-explanation affordance.
+- Section anchors jump the center diff to the relevant file and line range.
+- The right review sidebar presents a Devin-like Info tab that combines human comments and agent findings.
+- The Info tab groups findings by Bug, Investigate, and Note.
+- The Info tab provides copy, resolve, dismiss, post-to-platform, and ask-about-this actions where supported.
+- Post-to-platform actions are visible only when the review session has PR metadata.
+- Local diff mode hides platform-specific finding actions and still supports copy, resolve, dismiss, and ask-about-this.
+- The Chat tab accepts context refs for the whole review, a section, a finding, a comment, or a line range.
+- Asking about a finding or section adds an explicit context chip to the chat request.
+- The Agents UI becomes a secondary way to run analysis instead of the primary always-visible review artifact.
+- Empty analysis states show lightweight actions such as Run analysis or Run review.
+- Manual Run analysis populates sections without requiring the `--auto-run-analysis` flag.
+- Manual Run review populates findings without requiring the `--auto-run-analysis` flag.
+- The auto analysis pipeline defaults to Codex with model `gpt-5.5` and reasoning `high` when Codex is available.
+- The auto analysis pipeline falls back to Claude with model `claude-opus-4-7` and effort `high` when Codex is unavailable.
+- The analysis API accepts an `analysisConfig` object so provider/model configuration can be added later without redesigning the contract.
+- Broader PR management actions such as merge, close, draft, and auto-merge are out of scope for this first slice.
+- Chat-driven code edits and applying chat suggestions as commits are out of scope for this first slice.
+- Persisting analysis across Plannotator restarts is out of scope for this first slice.

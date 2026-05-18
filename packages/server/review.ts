@@ -29,6 +29,7 @@ import { contentHash, deleteDraft } from "./draft";
 import { createEditorAnnotationHandler } from "./editor-annotations";
 import { createExternalAnnotationHandler } from "./external-annotations";
 import { createAgentJobHandler } from "./agent-jobs";
+import { createReviewAnalysisHandler } from "./review-analysis";
 import {
   CODEX_REVIEW_SYSTEM_PROMPT,
   buildCodexCommand,
@@ -44,6 +45,11 @@ import {
   transformClaudeFindings,
 } from "./claude-review";
 import { createTourSession, TOUR_EMPTY_OUTPUT_ERROR } from "./tour/tour-review";
+import {
+  DEFAULT_REVIEW_ANALYSIS_CONFIG,
+  transformClaudeFindingsToReviewFindings,
+  transformCodexFindingsToReviewFindings,
+} from "@plannotator/shared/review-analysis";
 import { loadConfig, saveConfig, detectGitUser, getServerConfig } from "./config";
 import { type PRMetadata, type PRReviewFileComment, type PRStackTree, type PRListItem, fetchPR, fetchPRFileContent, fetchPRContext, submitPRReview, fetchPRViewedFiles, markPRFilesViewed, fetchPRStack, fetchPRList, getPRUser, parsePRUrl, prRefFromMetadata, isSameProject, getDisplayRepo, getMRLabel, getMRNumberLabel } from "./pr";
 import { createAIEndpoints, ProviderRegistry, SessionManager, createProvider, type AIEndpoints, type PiSDKConfig } from "@plannotator/ai";
@@ -98,6 +104,10 @@ export interface ReviewServerOptions {
   worktreePool?: import("@plannotator/shared/worktree-pool").WorktreePool;
   /** Cleanup callback invoked when server stops (e.g., remove temp worktree) */
   onCleanup?: () => void | Promise<void>;
+  /** Opt-in Devin-like review analysis mode. */
+  reviewAnalysis?: {
+    autoRun?: boolean;
+  };
 }
 
 export interface ReviewServerResult {
@@ -144,6 +154,12 @@ export async function startReviewServer(
   let draftKey = contentHash(options.rawPatch);
   const editorAnnotations = createEditorAnnotationHandler();
   const externalAnnotations = createExternalAnnotationHandler("review");
+  let runReviewAnalysisJobs: (kind: "analysis" | "review" | "all") => Promise<unknown> =
+    async () => ({ error: "Analysis runners not ready" });
+  const reviewAnalysis = createReviewAnalysisHandler({
+    autoRun: options.reviewAnalysis?.autoRun,
+    run: (kind) => runReviewAnalysisJobs(kind),
+  });
 
   const tour = createTourSession();
 
@@ -270,7 +286,10 @@ export async function startReviewServer(
       // --- Codex path ---
       if (job.provider === "codex" && meta.outputPath) {
         const output = await parseCodexOutput(meta.outputPath);
-        if (!output) return;
+        if (!output) {
+          reviewAnalysis.setRunState({ isRunningReview: false });
+          return;
+        }
 
         // Override verdict if there are blocking findings (P0/P1) — Codex's
         // freeform correctness string can say "mostly correct" with real bugs.
@@ -287,6 +306,13 @@ export async function startReviewServer(
           const result = externalAnnotations.addAnnotations({ annotations });
           if ("error" in result) console.error(`[codex-review] addAnnotations error:`, result.error);
         }
+        reviewAnalysis.addFindings(transformCodexFindingsToReviewFindings(output.findings, {
+          source: job.source,
+          cwd,
+          sourceAgent: "Codex",
+          sourceJobId: job.id,
+          sections: reviewAnalysis.getAnalysis().sections,
+        }));
         return;
       }
 
@@ -295,6 +321,7 @@ export async function startReviewServer(
         const output = parseClaudeStreamOutput(meta.stdout);
         if (!output) {
           console.error(`[claude-review] Failed to parse output (${meta.stdout.length} bytes, last 200: ${meta.stdout.slice(-200)})`);
+          reviewAnalysis.setRunState({ isRunningReview: false });
           return;
         }
 
@@ -311,6 +338,13 @@ export async function startReviewServer(
           const result = externalAnnotations.addAnnotations({ annotations });
           if ("error" in result) console.error(`[claude-review] addAnnotations error:`, result.error);
         }
+        reviewAnalysis.addFindings(transformClaudeFindingsToReviewFindings(output.findings, {
+          source: job.source,
+          cwd,
+          sourceAgent: "Claude Code",
+          sourceJobId: job.id,
+          sections: reviewAnalysis.getAnalysis().sections,
+        }));
         return;
       }
 
@@ -319,6 +353,8 @@ export async function startReviewServer(
         const { summary } = await tour.onJobComplete({ job, meta });
         if (summary) {
           job.summary = summary;
+          const tourData = tour.getTour(job.id);
+          if (tourData) reviewAnalysis.setTourResult(tourData, currentPatch);
         } else {
           // The process exited 0 but the model returned empty or malformed output
           // and nothing was stored. Flip status so the client doesn't auto-open
@@ -329,7 +365,63 @@ export async function startReviewServer(
         return;
       }
     },
+
+    onJobSettled(job) {
+      if (job.status === "done") return;
+      if (job.provider === "tour") reviewAnalysis.setRunState({ isRunningAnalysis: false });
+      if (job.provider === "codex" || job.provider === "claude") reviewAnalysis.setRunState({ isRunningReview: false });
+    },
   });
+
+  runReviewAnalysisJobs = async (kind) => {
+    const capabilities = agentJobs.getCapabilities();
+    const hasCodex = capabilities.providers.some((provider) => provider.id === "codex" && provider.available);
+    const hasClaude = capabilities.providers.some((provider) => provider.id === "claude" && provider.available);
+    const provider = hasCodex ? "codex" : hasClaude ? "claude" : null;
+    if (!provider) throw new Error("No review agent provider is available");
+
+    const config = provider === "codex"
+      ? {
+          provider: "codex",
+          model: DEFAULT_REVIEW_ANALYSIS_CONFIG.primary.model,
+          reasoningEffort: DEFAULT_REVIEW_ANALYSIS_CONFIG.primary.reasoningEffort,
+        }
+      : {
+          provider: "claude",
+          model: DEFAULT_REVIEW_ANALYSIS_CONFIG.fallback.model,
+          effort: DEFAULT_REVIEW_ANALYSIS_CONFIG.fallback.effort,
+        };
+
+    const launched = [];
+    if (kind === "analysis" || kind === "all") {
+      reviewAnalysis.setRunState({ isRunningAnalysis: true });
+      const result = await agentJobs.launchJob({
+        provider: "tour",
+        engine: provider,
+        model: config.model,
+        ...(provider === "codex"
+          ? { reasoningEffort: DEFAULT_REVIEW_ANALYSIS_CONFIG.primary.reasoningEffort }
+          : { effort: DEFAULT_REVIEW_ANALYSIS_CONFIG.fallback.effort }),
+      });
+      if ("error" in result) {
+        reviewAnalysis.setRunState({ isRunningAnalysis: false });
+        throw new Error(result.error);
+      }
+      launched.push(result.job);
+    }
+
+    if (kind === "review" || kind === "all") {
+      reviewAnalysis.setRunState({ isRunningReview: true });
+      const result = await agentJobs.launchJob(config);
+      if ("error" in result) {
+        reviewAnalysis.setRunState({ isRunningReview: false });
+        throw new Error(result.error);
+      }
+      launched.push(result.job);
+    }
+
+    return { jobs: launched };
+  };
 
   // AI provider setup (graceful — AI features degrade if SDK unavailable)
   const aiRegistry = new ProviderRegistry();
@@ -1015,6 +1107,12 @@ export async function startReviewServer(
           });
           if (externalResponse) return externalResponse;
 
+          // API: Review analysis (sections, findings, manual run controls)
+          const analysisResponse = await reviewAnalysis.handle(req, url, {
+            disableIdleTimeout: () => server.timeout(req, 0),
+          });
+          if (analysisResponse) return analysisResponse;
+
           // API: Agent jobs (background review agents)
           const agentResponse = await agentJobs.handle(req, url, {
             disableIdleTimeout: () => server.timeout(req, 0),
@@ -1192,6 +1290,15 @@ export async function startReviewServer(
   // Notify caller that server is ready
   if (onReady) {
     onReady(serverUrl, isRemote, port);
+  }
+
+  if (options.reviewAnalysis?.autoRun) {
+    queueMicrotask(() => {
+      runReviewAnalysisJobs("all").catch((err) => {
+        reviewAnalysis.setRunState({ isRunningAnalysis: false, isRunningReview: false });
+        console.error("[review-analysis] auto-run failed:", err instanceof Error ? err.message : String(err));
+      });
+    });
   }
 
   return {

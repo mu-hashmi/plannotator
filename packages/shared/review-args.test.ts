@@ -7,6 +7,7 @@ describe("parseReviewArgs", () => {
       prUrl: undefined,
       vcsType: undefined,
       useLocal: true,
+      autoRunAnalysis: false,
     });
   });
 
@@ -15,6 +16,7 @@ describe("parseReviewArgs", () => {
       prUrl: undefined,
       vcsType: "git",
       useLocal: true,
+      autoRunAnalysis: false,
     });
   });
 
@@ -23,11 +25,13 @@ describe("parseReviewArgs", () => {
       prUrl: "https://github.com/acme/repo/pull/12",
       vcsType: "git",
       useLocal: true,
+      autoRunAnalysis: false,
     });
     expect(parseReviewArgs("https://github.com/acme/repo/pull/12 --git")).toEqual({
       prUrl: "https://github.com/acme/repo/pull/12",
       vcsType: "git",
       useLocal: true,
+      autoRunAnalysis: false,
     });
   });
 
@@ -36,6 +40,7 @@ describe("parseReviewArgs", () => {
       prUrl: "https://github.com/acme/repo/pull/12",
       vcsType: undefined,
       useLocal: false,
+      autoRunAnalysis: false,
     });
   });
 
@@ -44,6 +49,7 @@ describe("parseReviewArgs", () => {
       prUrl: "https://github.com/acme/repo/pull/12",
       vcsType: "git",
       useLocal: false,
+      autoRunAnalysis: false,
     });
   });
 
@@ -59,6 +65,16 @@ describe("parseReviewArgs", () => {
       prUrl: undefined,
       vcsType: "git",
       useLocal: true,
+      autoRunAnalysis: false,
+    });
+  });
+
+  test("parses the opt-in analysis auto-run flag", () => {
+    expect(parseReviewArgs("--auto-run-analysis --git https://github.com/acme/repo/pull/12")).toEqual({
+      prUrl: "https://github.com/acme/repo/pull/12",
+      vcsType: "git",
+      useLocal: true,
+      autoRunAnalysis: true,
     });
   });
 });
